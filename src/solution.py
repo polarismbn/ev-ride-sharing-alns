@@ -4,14 +4,14 @@ from typing import List, Optional
 class Solution:
     """
     Represents a solution for Encoding 2 (Simple Version)
-    - Hub opening decisions
-    - Number of vehicles
+    - Hub opening decisions (Y)
+    - Number of vehicles (K)
     - Passenger to hub assignments
     """
     
     def __init__(self, num_hubs: int, num_passengers: int):
-        # First-stage decisions
-        self.Y = np.zeros(num_hubs, dtype=int)           # Opened hubs (binary vector)
+        # First-stage strategic decisions
+        self.Y = np.zeros(num_hubs, dtype=int)           # Binary vector for opened hubs
         self.K = 0                                       # Number of active vehicles
         
         # Passenger assignment
@@ -26,11 +26,11 @@ class Solution:
         self.unserved_count: int = 0
         self.is_feasible: bool = False
         
-        # To store routes after decoding (optional)
+        # Optional: store decoded routes later
         self.routes: Optional[List] = None
 
-    def is_feasible(self) -> bool:
-        """Check if solution is feasible"""
+    def check_feasibility(self) -> bool:
+        """Check if the solution is feasible"""
         opened_hubs = set(np.where(self.Y == 1)[0])
         
         for p in range(len(self.OriginHub)):
@@ -42,3 +42,8 @@ class Solution:
             return False
             
         return True
+
+    def __str__(self):
+        opened = np.where(self.Y == 1)[0].tolist()
+        return (f"Solution | Opened Hubs: {opened} | Vehicles: {self.K} | "
+                f"Fitness: {self.fitness:,.0f} | Feasible: {self.is_feasible}")
