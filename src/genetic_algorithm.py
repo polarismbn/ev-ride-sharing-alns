@@ -176,15 +176,15 @@ class GeneticAlgorithm:
             Goal: explore low-cost, likely infeasible region of search space.
         """
         population = []
-        third = self.pop_size // 3
+        quarter = self.pop_size // 4
 
         # Minimum vehicle gene ratio to serve the most demanding scenario
         min_k_ratio = min(1.0, self.num_passengers / (self.capacity * self.V_max))
 
-        # Strategy 1: feasibility-biased
-        for _ in range(third):
+        # Strategy 1: feasibility-biased -- many hubs open, enough EVs
+        for _ in range(quarter):
             chrom    = self.rng.random(self.chrom_length)
-            n_open   = self.rng.integers(3, self.num_hubs + 1)
+            n_open   = self.rng.integers(max(3, self.num_hubs // 2), self.num_hubs + 1)
             open_idx = self.rng.choice(self.num_hubs, size=n_open, replace=False)
             chrom[:self.num_hubs]  = 0.1
             chrom[open_idx]        = 0.65 + 0.35 * self.rng.random(n_open)
@@ -192,16 +192,27 @@ class GeneticAlgorithm:
             population.append(Solution.from_array(chrom, self.num_hubs, self.V_max))
 
         # Strategy 2: fully random
-        for _ in range(third):
+        for _ in range(quarter):
             population.append(Solution.random(self.num_hubs, self.V_max, self.rng))
 
-        # Strategy 3: sparse (low cost exploration)
-        for _ in range(self.pop_size - 2 * third):
+        # Strategy 3: sparse -- few hubs (2-3), explore low-cost region
+        for _ in range(quarter):
             chrom    = self.rng.random(self.chrom_length)
             n_open   = self.rng.integers(2, 4)
             open_idx = self.rng.choice(self.num_hubs, size=n_open, replace=False)
             chrom[:self.num_hubs] = 0.1
             chrom[open_idx]       = 0.6 + 0.4 * self.rng.random(n_open)
+            population.append(Solution.from_array(chrom, self.num_hubs, self.V_max))
+
+        # Strategy 4: medium -- 4-6 hubs open, moderate EVs
+        # This helps bridge the gap between sparse and feasibility-biased
+        for _ in range(self.pop_size - 3 * quarter):
+            chrom    = self.rng.random(self.chrom_length)
+            n_open   = self.rng.integers(4, min(7, self.num_hubs) + 1)
+            open_idx = self.rng.choice(self.num_hubs, size=n_open, replace=False)
+            chrom[:self.num_hubs]  = 0.1
+            chrom[open_idx]        = 0.6 + 0.4 * self.rng.random(n_open)
+            chrom[self.num_hubs]   = 0.4 + 0.5 * self.rng.random()
             population.append(Solution.from_array(chrom, self.num_hubs, self.V_max))
 
         return population

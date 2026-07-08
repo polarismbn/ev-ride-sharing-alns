@@ -88,10 +88,12 @@ class Solution:
 
         self.Y = (hub_genes > 0.5).astype(int)
 
-        # Force at least 2 hubs open to avoid trivially infeasible solutions
-        if int(np.sum(self.Y)) < 2:
-            top2 = np.argsort(hub_genes)[-2:]
-            self.Y[top2] = 1
+        # Force at least 1 hub open to avoid completely infeasible solutions.
+        # We allow 1 hub (not 2) so the Pareto search can explore low-cost
+        # configurations where only a few hubs are open.
+        if int(np.sum(self.Y)) < 1:
+            top1 = np.argsort(hub_genes)[-1:]
+            self.Y[top1] = 1
 
         self.K = max(1, round(float(vehicle_gene) * self.V_max))
 
