@@ -25,8 +25,8 @@ from src.genetic_algorithm import GeneticAlgorithm
 # 1. PROBLEM PARAMETERS
 # ══════════════════════════════════════════════════════════════
 
-NUM_HUBS = 8
-V_MAX    = 12
+NUM_HUBS = 20
+V_MAX    = 20
 
 np.random.seed(42)
 
@@ -51,7 +51,7 @@ recharge_time    = np.random.randint(10, 25, NUM_HUBS).astype(float)
 # Shape: (MAX_PASSENGERS, NUM_HUBS)
 # ══════════════════════════════════════════════════════════════
 
-MAX_PASSENGERS = 65
+MAX_PASSENGERS = 150
 walk_time_full = np.random.randint(2, 10, (MAX_PASSENGERS, NUM_HUBS)).astype(float)
 
 # ── Horig(p) and Hdest(p): allowed hubs per passenger (Eqs 11-14) ──────────
@@ -91,9 +91,9 @@ for p in range(MAX_PASSENGERS):
 # ══════════════════════════════════════════════════════════════
 
 scenarios = [
-    {"name": "Normal",   "probability": 0.50, "n_passengers": 40, "omega": 1.0},
-    {"name": "Moderate", "probability": 0.35, "n_passengers": 50, "omega": 1.3},
-    {"name": "Heavy",    "probability": 0.15, "n_passengers": 65, "omega": 1.8},
+    {"name": "Normal",   "probability": 0.50, "n_passengers": 100, "omega": 1.0},
+    {"name": "Moderate", "probability": 0.35, "n_passengers": 120, "omega": 1.3},
+    {"name": "Heavy",    "probability": 0.15, "n_passengers": 150, "omega": 1.8},
 ]
 
 NUM_PASSENGERS = max(s["n_passengers"] for s in scenarios)
@@ -145,7 +145,7 @@ print("="*55)
 
 ga_single = GeneticAlgorithm(
     decoder=decoder, num_hubs=NUM_HUBS, num_passengers=NUM_PASSENGERS,
-    V_max=V_MAX, pop_size=60, n_generations=50,
+    V_max=V_MAX, pop_size=60, n_generations=60,
     crossover_prob=0.9, mutation_prob=0.15, mutation_sigma=0.2,
     elite_ratio=0.1, pareto_mode=False, seed=42,
 )
@@ -173,7 +173,7 @@ print("="*55)
 
 ga_pareto = GeneticAlgorithm(
     decoder=decoder, num_hubs=NUM_HUBS, num_passengers=NUM_PASSENGERS,
-    V_max=V_MAX, pop_size=60, n_generations=50,
+    V_max=V_MAX, pop_size=60, n_generations=60,
     crossover_prob=0.9, mutation_prob=0.15, mutation_sigma=0.2,
     elite_ratio=0.1, pareto_mode=True, seed=42,
 )

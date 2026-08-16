@@ -285,7 +285,7 @@ class Decoder:
         non_attacked  = [a for a in all_arcs if a not in attacked_set]
 
         improved  = True
-        max_iter  = 20
+        max_iter  = 5    # reduced for speed on larger instances
         iteration = 0
 
         while improved and iteration < max_iter:

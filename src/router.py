@@ -341,9 +341,11 @@ class Router:
 
         # Allow revisiting hubs (multiple EVs can serve same hub)
         # Only exclude the current hub to prevent self-loops
+        # Only consider hubs reachable from current hub (finite distance)
+        # This handles directed sparse graphs where not all pairs have arcs
         candidates = [
             h for h in opened
-            if h != current_hub
+            if h != current_hub and np.isfinite(self.dist[current_hub, h])
         ]
 
         if not candidates:

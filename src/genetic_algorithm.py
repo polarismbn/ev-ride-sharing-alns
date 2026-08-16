@@ -69,7 +69,9 @@ class GeneticAlgorithm:
         elite_ratio:    float = 0.1,
         pareto_mode:    bool  = False,
         seed:           int   = 42,
+        force_all_hubs: bool  = False,
     ):
+        self.force_all_hubs = force_all_hubs
         self.decoder        = decoder
         self.num_hubs       = num_hubs
         self.num_passengers = num_passengers
@@ -184,11 +186,15 @@ class GeneticAlgorithm:
         # Strategy 1: feasibility-biased -- many hubs open, enough EVs
         for _ in range(quarter):
             chrom    = self.rng.random(self.chrom_length)
-            n_open   = self.rng.integers(max(3, self.num_hubs // 2), self.num_hubs + 1)
-            open_idx = self.rng.choice(self.num_hubs, size=n_open, replace=False)
-            chrom[:self.num_hubs]  = 0.1
-            chrom[open_idx]        = 0.65 + 0.35 * self.rng.random(n_open)
-            chrom[self.num_hubs]   = min_k_ratio + (1.0 - min_k_ratio) * self.rng.random()
+            if self.force_all_hubs:
+                # All hubs must be open for full passenger coverage
+                chrom[:self.num_hubs] = 0.65 + 0.35 * self.rng.random(self.num_hubs)
+            else:
+                n_open   = self.rng.integers(max(3, self.num_hubs // 2), self.num_hubs + 1)
+                open_idx = self.rng.choice(self.num_hubs, size=n_open, replace=False)
+                chrom[:self.num_hubs]  = 0.1
+                chrom[open_idx]        = 0.65 + 0.35 * self.rng.random(n_open)
+            chrom[self.num_hubs] = min_k_ratio + (1.0 - min_k_ratio) * self.rng.random()
             population.append(Solution.from_array(chrom, self.num_hubs, self.V_max))
 
         # Strategy 2: fully random
