@@ -1,26 +1,21 @@
 """
 router.py
 ---------
-Greedy per-EV route builder with Tin/Tout timing.
+Greedy per-EV route builder with Tin/Tout timing + proper battery SoC tracking.
 
-CHANGES IN THIS VERSION:
-    Added proper Tin/Tout timing (approximates Eqs 30-33 in paper):
+CHANGES IN THIS VERSION (Battery / SoC):
+    - Each EV starts a route with a FULL battery (SoC = battery_range).
+    - SoC is decreased by the length of every travelled leg.
+    - A recharge stop is inserted ONLY when the remaining SoC is insufficient
+      for the next intended leg.
+    - After recharging at an intermediate hub, SoC is restored to full.
+    - This replaces the previous (incorrect) check that only looked at
+      whether a single leg exceeded battery_range in isolation.
 
-    Eq 30: Tin[v,j] >= Tout[v,i] + t_ij   (travel time constraint)
-    Eq 31: Tout[v,h] >= Tin[v,h] + r_h    (recharge constraint)
-    Eq 32: Tout[v,i] >= w_{p,i}            (boarding: EV waits for passenger)
-    Eq 33: Ap >= Tin[v,j] + w_{p,j}        (completion time at destination)
-
-    Previously: Ap was approximated as departure_time + travel + walk.
-    Now: Ap is computed from exact Tin[v, dest_hub] + walk[p, dest_hub].
-
-    The EV schedule is sequential:
-        Tin[v, next_hub]  = Tout[v, current_hub] + travel_time
-        Tout[v, next_hub] = max(Tin[v, next_hub] + recharge, earliest_boarding)
-        Ap = Tin[v, dest_hub] + walk[p, dest_hub] * omega
-
-    This gives a more accurate completion time for each passenger,
-    which directly feeds into the ExpectedTime objective (Eq. 4).
+Timing (still approximates Eqs 30-33 of the paper):
+    Tin[v,j]  = Tout[v,i] + t_ij
+    Tout[v,h] = max(Tin[v,h] + r_h, earliest boarding time)
+    Ap        = Tin[v, dest] + walk[p, dest] * omega
 """
 
 import numpy as np
@@ -39,10 +34,11 @@ class EVRoute:
     stops       : ordered list of hub indices visited
     boarded     : hub -> list of passengers that boarded here
     alighted    : hub -> list of passengers that alighted here
-    Tin         : hub -> arrival time (Tin_{v,h} in paper)
-    Tout        : hub -> departure time (Tout_{v,h} in paper)
-    completion  : passenger -> completion time Ap (Eq. 33)
+    Tin         : hub -> arrival time
+    Tout        : hub -> departure time
+    completion  : passenger -> completion time Ap
     total_time  : last departure time in the route
+    final_soc   : remaining battery at the end of the route (for debugging)
     """
     ev_id:      int
     stops:      List[int]              = field(default_factory=list)
@@ -52,22 +48,23 @@ class EVRoute:
     Tout:       Dict[int, float]       = field(default_factory=dict)
     completion: Dict[int, float]       = field(default_factory=dict)
     total_time: float                  = 0.0
+    final_soc:  float                  = 0.0
 
 
 class Router:
     """
-    Builds greedy per-EV routes with proper Tin/Tout timing.
+    Builds greedy per-EV routes with proper Tin/Tout timing and SoC tracking.
 
     Parameters
     ----------
-    distance_matrix      : (H, H) attacked travel time matrix
+    distance_matrix      : (H, H) attacked travel time / distance matrix
     walk_time            : (n_p, H) walk times for active passengers
     recharge_time        : (H,) recharge delay per hub
-    battery_range        : max EV travel per charge
+    battery_range        : max EV travel distance on a full charge
     capacity             : seats per EV (Q)
-    passenger_orig_hubs  : Horig(p) per passenger
-    passenger_dest_hubs  : Hdest(p) per passenger
-    omega                : traffic multiplier (applied to walk times)
+    passenger_orig_hubs  : Horig(p) per passenger (optional)
+    passenger_dest_hubs  : Hdest(p) per passenger (optional)
+    omega                : traffic multiplier
     """
 
     def __init__(
@@ -84,11 +81,11 @@ class Router:
         self.dist          = distance_matrix
         self.walk          = walk_time
         self.recharge      = recharge_time
-        self.battery_range = battery_range
-        self.capacity      = capacity
+        self.battery_range = float(battery_range)
+        self.capacity      = int(capacity)
         self.orig_hubs     = passenger_orig_hubs
         self.dest_hubs     = passenger_dest_hubs
-        self.omega         = omega
+        self.omega         = float(omega)
         self.num_hubs      = distance_matrix.shape[0]
         self.n_passengers  = walk_time.shape[0]
 
@@ -109,10 +106,9 @@ class Router:
         Returns
         -------
         routes      : list of EVRoute objects
-        n_unserved  : passengers not served
-        total_Ap    : sum of all passenger completion times (Eq. 34)
+        n_unserved  : number of passengers that could not be served
+        total_Ap    : sum of all passenger completion times
         """
-        # Passengers with valid assignment
         assignable = set(
             p for p in range(self.n_passengers)
             if origin_hubs[p] != -1 and dest_hubs[p] != -1
@@ -130,7 +126,6 @@ class Router:
 
             if route is not None and len(route.stops) > 0:
                 routes.append(route)
-                # Mark all boarded passengers as served
                 for hub in route.stops:
                     for p in route.boarded.get(hub, []):
                         unserved.discard(p)
@@ -144,7 +139,7 @@ class Router:
         return routes, n_unserved, total_Ap
 
     # ------------------------------------------------------------------
-    # SINGLE EV ROUTE BUILDER
+    # SINGLE EV ROUTE BUILDER  (with SoC tracking)
     # ------------------------------------------------------------------
 
     def _build_single_route(
@@ -156,16 +151,17 @@ class Router:
         dest_hubs:   np.ndarray,
     ) -> Optional[EVRoute]:
         """
-        Build a greedy route for one EV with proper Tin/Tout timing.
+        Build a greedy route for one EV.
 
-        Timing rules (matching paper Eqs 30-33):
-            Tin[h]  = Tout[prev] + travel(prev -> h)           (Eq. 30)
-            Tout[h] = max(Tin[h] + recharge[h],               (Eq. 31)
-                          max(walk[p, h] for p boarding at h)) (Eq. 32)
-            Ap      = Tin[dest_hub] + walk[p, dest_hub]*omega  (Eq. 33)
+        Battery / SoC rules:
+            - EV starts with a full battery (SoC = battery_range).
+            - Every leg decreases SoC by the travel distance.
+            - A recharge stop is inserted only when current SoC is
+              insufficient for the next intended leg.
+            - After recharging, SoC is restored to full.
         """
         route    = EVRoute(ev_id=ev_id)
-        on_board = []    # passengers currently in EV
+        on_board = []
 
         # Choose starting hub: open hub with most waiting passengers
         hub_demand = {}
@@ -178,23 +174,20 @@ class Router:
             return None
 
         current_hub  = max(hub_demand, key=hub_demand.get)
-        current_time = 0.0   # EV clock starts at 0
+        current_time = 0.0
+        current_soc  = self.battery_range          # <<< full battery at start
 
-        # ── First stop: starting hub ─────────────────────────────────
+        # ── First stop ───────────────────────────────────────────────
         route.stops.append(current_hub)
-
-        # Tin = 0 at starting hub (Eq. 30, first stop)
         route.Tin[current_hub] = 0.0
 
-        # Load passengers at starting hub
         boarded_here = self._load_passengers(
             current_hub, on_board, unserved, origin_hubs
         )
         route.boarded[current_hub] = boarded_here
         on_board += boarded_here
 
-        # Tout[h] = max(Tin[h] + recharge, max walk of boarding passengers)
-        # Eq. 31 + Eq. 32
+        # Departure time at first hub (recharge + boarding)
         min_depart = (
             float(self.recharge[current_hub]) * self.omega
             + route.Tin[current_hub]
@@ -209,7 +202,7 @@ class Router:
         route.Tout[current_hub] = min_depart
         current_time = min_depart
 
-        max_stops  = self.num_hubs
+        max_stops  = self.num_hubs * 2          # safety limit
         stop_count = 0
 
         # ── Main routing loop ────────────────────────────────────────
@@ -219,52 +212,69 @@ class Router:
             next_hub = self._choose_next_hub(
                 current_hub, on_board, dest_hubs, opened, route.stops
             )
-
             if next_hub is None:
                 break
 
-            travel = self.dist[current_hub, next_hub]
+            travel = float(self.dist[current_hub, next_hub])
 
-            # If direct travel exceeds battery range, find recharge stop
-            if travel > self.battery_range:
+            # ----------------------------------------------------------
+            # Battery check: do we have enough SoC for this leg?
+            # ----------------------------------------------------------
+            if current_soc < travel - 1e-6:
+                # Need to recharge before (or on the way to) next_hub
                 mid, _ = self._find_recharge_stop(
-                    current_hub, next_hub, opened, route.stops
+                    current_hub, next_hub, opened, route.stops,
+                    current_soc=current_soc
                 )
+
                 if mid is None:
+                    # Cannot reach any suitable recharge hub → abort this EV
                     break
 
-                # Add recharge intermediate stop
-                t_mid_in  = current_time + self.dist[current_hub, mid]
+                # Travel to the intermediate recharge hub
+                leg_to_mid = float(self.dist[current_hub, mid])
+                if current_soc < leg_to_mid - 1e-6:
+                    # Even the recharge hub is unreachable with current SoC
+                    break
+
+                t_mid_in  = current_time + leg_to_mid
                 t_mid_out = t_mid_in + float(self.recharge[mid]) * self.omega
 
                 route.stops.append(mid)
-                route.Tin[mid]  = t_mid_in
-                route.Tout[mid] = t_mid_out
+                route.Tin[mid]      = t_mid_in
+                route.Tout[mid]     = t_mid_out
                 route.boarded[mid]  = []
                 route.alighted[mid] = []
 
+                # Consume battery to reach mid, then fully recharge
+                current_soc  = self.battery_range
                 current_time = t_mid_out
                 current_hub  = mid
-                travel       = self.dist[mid, next_hub]
+                travel       = float(self.dist[mid, next_hub])
 
-            # ── Arrive at next hub (Eq. 30) ──────────────────────────
+                # After full recharge, check again
+                if current_soc < travel - 1e-6:
+                    # Still impossible (should be rare with correct _find)
+                    break
+
+            # ----------------------------------------------------------
+            # Now we can travel to next_hub
+            # ----------------------------------------------------------
             t_arrive = current_time + travel
+            current_soc -= travel                 # consume battery
 
-            # ── Depart time: max(recharge done, all passengers ready) ─
-            # Eq. 31: must wait for recharge
+            # Base departure: arrival + recharge time at this hub
             t_depart = t_arrive + float(self.recharge[next_hub]) * self.omega
 
-            # ── Unload passengers whose destination is this hub ───────
+            # Unload passengers whose destination is this hub
             alighted_here = [p for p in on_board if dest_hubs[p] == next_hub]
             on_board      = [p for p in on_board if p not in alighted_here]
 
-            # Record completion times Ap for alighted passengers (Eq. 33)
             for p in alighted_here:
                 walk_p = float(self.walk[p, next_hub]) * self.omega
-                Ap     = t_arrive + walk_p
-                route.completion[p] = Ap
+                route.completion[p] = t_arrive + walk_p
 
-            # ── Load more passengers if capacity allows ───────────────
+            # Load more passengers if capacity remains
             if len(on_board) < self.capacity:
                 new_boarded = self._load_passengers(
                     next_hub, on_board, unserved, origin_hubs
@@ -272,7 +282,7 @@ class Router:
             else:
                 new_boarded = []
 
-            # Eq. 32: EV must wait for boarding passengers
+            # Wait for boarding passengers (Eq. 32 style)
             if new_boarded:
                 boarding_ready = max(
                     float(self.walk[p, next_hub]) * self.omega
@@ -280,10 +290,10 @@ class Router:
                 )
                 t_depart = max(t_depart, boarding_ready)
 
-            # Record stop
+            # Record the stop
             route.stops.append(next_hub)
-            route.Tin[next_hub]     = t_arrive
-            route.Tout[next_hub]    = t_depart
+            route.Tin[next_hub]      = t_arrive
+            route.Tout[next_hub]     = t_depart
             route.alighted[next_hub] = alighted_here
             route.boarded[next_hub]  = new_boarded
             on_board += new_boarded
@@ -291,15 +301,17 @@ class Router:
             current_time = t_depart
             current_hub  = next_hub
 
-        # Any passengers still on board at end of route: record completion
-        # at last hub (EV terminates route)
+        # Passengers still on board at the end of the route
         for p in on_board:
             if p not in route.completion:
                 d      = dest_hubs[p]
                 walk_p = float(self.walk[p, d]) * self.omega
-                route.completion[p] = current_time + self.dist[current_hub, d] + walk_p
+                # Approximate remaining travel
+                extra  = float(self.dist[current_hub, d]) if np.isfinite(self.dist[current_hub, d]) else 0.0
+                route.completion[p] = current_time + extra + walk_p
 
         route.total_time = current_time
+        route.final_soc  = current_soc
         return route
 
     # ------------------------------------------------------------------
@@ -313,7 +325,7 @@ class Router:
         unserved:    set,
         origin_hubs: np.ndarray,
     ) -> List[int]:
-        """Load unserved passengers at this hub up to remaining capacity."""
+        """Load unserved passengers waiting at this hub up to remaining capacity."""
         waiting = sorted([
             p for p in unserved
             if origin_hubs[p] == hub and p not in on_board
@@ -330,8 +342,8 @@ class Router:
         visited:     List[int],
     ) -> Optional[int]:
         """
-        Choose next hub: prefer hub where most on-board passengers alight.
-        Among ties: pick closest hub.
+        Choose next hub: prefer the hub where most on-board passengers alight.
+        Tie-break by shorter distance.
         """
         dest_count = {}
         for p in on_board:
@@ -339,15 +351,10 @@ class Router:
             if d in opened and d != current_hub:
                 dest_count[d] = dest_count.get(d, 0) + 1
 
-        # Allow revisiting hubs (multiple EVs can serve same hub)
-        # Only exclude the current hub to prevent self-loops
-        # Only consider hubs reachable from current hub (finite distance)
-        # This handles directed sparse graphs where not all pairs have arcs
         candidates = [
             h for h in opened
             if h != current_hub and np.isfinite(self.dist[current_hub, h])
         ]
-
         if not candidates:
             return None
 
@@ -360,24 +367,44 @@ class Router:
 
     def _find_recharge_stop(
         self,
-        o:       int,
-        d:       int,
-        opened:  np.ndarray,
-        visited: List[int],
+        o:           int,
+        d:           int,
+        opened:      np.ndarray,
+        visited:     List[int],
+        current_soc: float = None,
     ) -> Tuple[Optional[int], float]:
-        """Find best intermediate recharge hub between o and d."""
+        """
+        Find the best intermediate hub for recharging between o and d.
+
+        A candidate mid must satisfy:
+            - reachable from o with the *current* SoC
+            - after a full recharge, the leg mid → d is within battery_range
+        """
+        if current_soc is None:
+            current_soc = self.battery_range
+
         best_hub  = None
         best_time = float('inf')
 
         for m in opened:
             if m == o or m == d or m in visited:
                 continue
-            leg1 = self.dist[o, m]
-            leg2 = self.dist[m, d]
-            if leg1 <= self.battery_range and leg2 <= self.battery_range:
-                total = leg1 + float(self.recharge[m]) * self.omega + leg2
-                if total < best_time:
-                    best_time = total
-                    best_hub  = m
+            if not (np.isfinite(self.dist[o, m]) and np.isfinite(self.dist[m, d])):
+                continue
+
+            leg1 = float(self.dist[o, m])
+            leg2 = float(self.dist[m, d])
+
+            # Must be reachable with current remaining battery
+            if leg1 > current_soc + 1e-6:
+                continue
+            # After full recharge, leg2 must be feasible
+            if leg2 > self.battery_range + 1e-6:
+                continue
+
+            total = leg1 + float(self.recharge[m]) * self.omega + leg2
+            if total < best_time:
+                best_time = total
+                best_hub  = m
 
         return best_hub, best_time
